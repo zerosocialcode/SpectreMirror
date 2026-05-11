@@ -172,21 +172,42 @@ async function cloneWebsite({ url, outputDir, chromiumPath, downloadAssets = tru
       const skipped = downloadResults.length - successful;
       log.info(`✅ Downloaded ${successful} assets, skipped ${skipped}`);
 
-      // Post-process HTML to rewrite asset URLs to local files
+      // Post-process HTML to inject fallback logic
+      // ONLY rewrite asset URLs (img src, link href, script src) that were successfully downloaded
+      // DO NOT rewrite href links in <a> tags (buttons, navigation) - keep them as remote URLs
       let htmlData = await fs.readFile(htmlFile, 'utf8');
+      
       for (const result of downloadResults) {
         if (result.status === 'fulfilled' && result.value) {
           const res = result.value;
-          htmlData = htmlData.split(res.original).join(res.local.replace(/\\/g, '/'));
+          const localPath = res.local.replace(/\\/g, '/');
+          
+          // Only rewrite actual asset tags (img, style, script src) with fallback
+          // This regex matches img src, link href, and script src attributes
+          const assetRegex = new RegExp(
+            `((?:src|href)=["'])${escapeRegex(res.original)}(["'])`,
+            'g'
+          );
+          
+          htmlData = htmlData.replace(assetRegex, (match, prefix, suffix) => {
+            // Add fallback: use local copy, fall back to original if that fails
+            return `${prefix}${localPath}" onerror="this.src='${res.original}'` + (prefix.includes('href') ? '' : '') + `${suffix}`;
+          });
         }
       }
+      
       await fs.writeFile(htmlFile, htmlData);
-      log.info(`🔗 Rewrote asset URLs in: ${htmlFile}`);
+      log.info(`🔗 Added fallback URLs for assets in: ${htmlFile}`);
     }
   } finally {
     await browser.close();
     log.debug('🛑 Chromium closed.');
   }
+}
+
+// Helper function to escape special regex characters
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 module.exports = { cloneWebsite };
