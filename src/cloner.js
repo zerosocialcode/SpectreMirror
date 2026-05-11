@@ -9,32 +9,19 @@ const log = require('./logger');
 
 puppeteerExtra.use(StealthPlugin());
 
-// Max filename length for most filesystems (255 bytes)
-const MAX_FILENAME_LENGTH = 200;
-
 // Sanitize filename to remove invalid characters
 function sanitizeFilename(filename) {
   return filename
-    .replace(/[<>:"|?*]/g, '_') // Invalid chars on Windows
-    .replace(/[\0]/g, '') // Null bytes
-    .replace(/\s+/g, '_') // Multiple spaces
+    .replace(/[<>:"|?*]/g, '_')
+    .replace(/[\0]/g, '')
+    .replace(/\s+/g, '_')
     .trim();
 }
 
-// Handle long filenames by hashing them
-function handleLongFilename(url, originalFilename) {
-  let filename = sanitizeFilename(originalFilename);
-  
-  if (filename.length > MAX_FILENAME_LENGTH) {
-    // Get file extension
-    const ext = path.extname(filename) || '';
-    // Hash the full URL to create a short unique name
-    const hash = crypto.createHash('md5').update(url).digest('hex').substring(0, 8);
-    filename = hash + ext;
-    log.debug(`[FILENAME] Hashed long URL to: ${filename}`);
-  }
-  
-  return filename;
+// Hash long filenames
+function hashLongFilename(url) {
+  const hash = crypto.createHash('md5').update(url).digest('hex');
+  return hash;
 }
 
 // Validate and normalize URLs
@@ -47,14 +34,14 @@ function isValidUrl(url) {
   }
 }
 
-// Check if URL is a data URI
+// Check if URL is a data URI - CHECK THIS FIRST
 function isDataUri(url) {
-  return url.startsWith('data:');
+  return url && url.startsWith('data:');
 }
 
 async function downloadAsset(assetUrl, outputDir, baseUrl) {
   try {
-    // Skip data URIs (they're inline and don't need downloading)
+    // FIRST: Skip data URIs before any URL processing
     if (isDataUri(assetUrl)) {
       log.debug(`[SKIP] Data URI: ${assetUrl.substring(0, 50)}...`);
       return null;
@@ -89,26 +76,32 @@ async function downloadAsset(assetUrl, outputDir, baseUrl) {
       return null;
     }
 
-    // Parse URL and remove query parameters
+    // Parse URL and get filename
     const urlObj = new URL(url);
-    const pathname = urlObj.pathname;
-    const hostname = urlObj.hostname;
-    let filename = path.basename(pathname) || 'index.html';
+    let filename = path.basename(urlObj.pathname) || 'index.html';
+    filename = sanitizeFilename(filename);
 
-    // Handle long filenames
-    filename = handleLongFilename(url, filename);
+    // If filename is too long, hash it but keep extension
+    if (filename.length > 150) {
+      const ext = path.extname(filename);
+      const hash = hashLongFilename(url);
+      filename = hash + ext;
+      log.debug(`[FILENAME] Hashed long filename to: ${filename}`);
+    }
 
-    // Build asset path
-    const assetPath = path.join(outputDir, hostname, pathname.replace(/\/[^\/]*$/, ''), filename);
+    // Use a flat structure: outputDir/hostname/filename
+    // This avoids the deeply nested paths that cause ENAMETOOLONG
+    const hostname = urlObj.hostname || 'unknown';
+    const assetPath = path.join(outputDir, hostname, filename);
     
-    // Ensure directory exists
-    await fs.ensureDir(path.dirname(assetPath));
-
-    // Check if path is too long before writing
-    if (assetPath.length > 260) {
-      log.debug(`[SKIP] Full path exceeds length limit: ${assetPath.substring(0, 50)}...`);
+    // Check if the final path would be too long (Windows 260 char limit)
+    if (assetPath.length > 250) {
+      log.debug(`[SKIP] Path too long (${assetPath.length}): ${url}`);
       return null;
     }
+
+    // Ensure directory exists
+    await fs.ensureDir(path.dirname(assetPath));
 
     // Write file
     const buffer = await res.buffer();
@@ -117,11 +110,11 @@ async function downloadAsset(assetUrl, outputDir, baseUrl) {
     
     return { original: assetUrl, local: path.relative(outputDir, assetPath) };
   } catch (err) {
-    // Only log non-404 errors as warnings; 404s are expected for some assets
-    if (err.message.includes('404')) {
-      log.debug(`[SKIP] HTTP 404: ${assetUrl}`);
-    } else if (err.message.includes('ENAMETOOLONG')) {
+    // Handle different error types
+    if (err.message && err.message.includes('ENAMETOOLONG')) {
       log.debug(`[SKIP] Filename too long: ${assetUrl}`);
+    } else if (err.code === 'ENAMETOOLONG') {
+      log.debug(`[SKIP] Path too long: ${assetUrl}`);
     } else {
       log.debug(`[ASSET] Failed: ${assetUrl} (${err.message})`);
     }
